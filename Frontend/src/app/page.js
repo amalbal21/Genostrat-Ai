@@ -20,15 +20,16 @@ import {
 } from 'lucide-react';
 import DNA from '@/components/DNA';
 import InteractiveBg from '@/components/InteractiveBg';
+import TeamSection from '@/components/TeamSection';
 
 // ─── Animation Variants ───────────────────────────────────────────────────────
 // Expo-out easing: fast initial movement → silky deceleration to rest
 const EXPO_OUT = [0.16, 1, 0.3, 1];
-const EASE_OUT  = [0.25, 0.46, 0.45, 0.94];
+const EASE_OUT = [0.25, 0.46, 0.45, 0.94];
 
 const fadeUp = {
   hidden: { opacity: 0, y: 36 },
-  show:   { opacity: 1, y: 0,  transition: { duration: 0.75, ease: EXPO_OUT } },
+  show: { opacity: 1, y: 0, transition: { duration: 0.75, ease: EXPO_OUT } },
 };
 
 const stagger = {
@@ -37,7 +38,7 @@ const stagger = {
 
 const scaleIn = {
   hidden: { opacity: 0, scale: 0.88, y: 12 },
-  show:   {
+  show: {
     opacity: 1, scale: 1, y: 0,
     transition: { duration: 0.8, ease: EXPO_OUT },
   },
@@ -101,20 +102,20 @@ function PharmaFeatureCard({ icon: Icon, title, text }) {
 // ─── Explainable AI Modal ────────────────────────────────────────────────────────
 function PredictiveXAIModal({ xaiData, onClose }) {
   if (!xaiData) return null;
-  const seed = parseInt(xaiData.id.replace(/\D/g, '') || '1234');
   const isResistant = xaiData.type === 'resistant';
-  
-  const layer1Features = isResistant 
-    ? [ { name: "BRAF V600E Expr", weight: -44, pos: false }, { name: "KRAS Mut", weight: -38, pos: false }, { name: "TP53 Alt", weight: -19, pos: false } ]
-    : [ { name: "CD274 (PD-L1)", weight: 48, pos: true }, { name: "MAPK Pathway Activ.", weight: 35, pos: true }, { name: "NRAS Expr", weight: 12, pos: true } ];
-    
-  const tippingFeature = isResistant ? "BRAF V600E Expr" : "CD274 (PD-L1)";
-  const tippingValue = isResistant ? "-1.4 log-folds" : "-0.8 log-folds";
-  const flippedClass = isResistant ? "High-Responder (Trial Go)" : "Resistant (Trial No-Go)";
 
-  const narrativeText = isResistant
-    ? `Patient ${xaiData.id} was classified as Resistant primarily due to significant upregulation of ${layer1Features[0].name} combined with ${layer1Features[1].name}. These factors overwhelmed baseline mechanisms, driving treatment bypass logic. If ${tippingFeature} were reduced by ${tippingValue}, the model confidence would shift toward approval.`
-    : `Patient ${xaiData.id} strongly aligned with a High-Responder profile, driven almost entirely by predictive biomarker ${layer1Features[0].name}. The synergistic activation of ${layer1Features[1].name} further fortified the classification. Reducing ${tippingFeature} by just ${tippingValue} would critically undermine responsiveness.`;
+  // Use actual attribution values from backend
+  const attributions = xaiData.attribution || {};
+  const layer1Features = Object.entries(attributions)
+    .map(([name, weight]) => ({
+      name,
+      weight: parseFloat(weight),
+      pos: parseFloat(weight) > 0
+    }))
+    .sort((a,b) => Math.abs(b.weight) - Math.abs(a.weight));
+
+  const counterfactuals = xaiData.counterfactuals || [];
+  const narrativeText = xaiData.narrative || "Narrative not generated.";
 
   return (
     <motion.div
@@ -147,20 +148,22 @@ function PredictiveXAIModal({ xaiData, onClose }) {
               The Attribution Engine (SHAP)
             </h3>
             <div className="space-y-4 bg-slate-50 p-5 rounded-2xl border border-slate-100">
-              {layer1Features.map((f, i) => (
+              {layer1Features.length > 0 ? layer1Features.map((f, i) => {
+                const barWidth = Math.min(Math.abs(f.weight) * 200, 100); 
+                return (
                 <div key={i}>
                   <div className="flex justify-between type-mono text-xs text-slate-500 mb-1.5">
                     <span>{f.name}</span>
-                    <span style={{ color: f.pos ? 'var(--green)' : 'var(--red)' }}>{f.pos ? '+' : ''}{f.weight}%</span>
+                    <span style={{ color: f.pos ? 'var(--green)' : 'var(--red)' }}>{f.pos ? '+' : ''}{f.weight.toFixed(4)}</span>
                   </div>
                   <div className="w-full bg-slate-200 h-2 rounded-full overflow-hidden">
-                    <motion.div 
-                      initial={{ width: 0 }} animate={{ width: `${Math.abs(f.weight)}%` }} transition={{ duration: 1, delay: 0.2 + (i*0.1) }}
-                      className="h-full rounded-full" style={{ background: f.pos ? 'var(--green)' : 'var(--red)' }} 
+                    <motion.div
+                      initial={{ width: 0 }} animate={{ width: `${barWidth}%` }} transition={{ duration: 1, delay: 0.2 + (i * 0.1) }}
+                      className="h-full rounded-full" style={{ background: f.pos ? 'var(--green)' : 'var(--red)' }}
                     />
                   </div>
                 </div>
-              ))}
+              )}) : <div className="text-sm text-slate-500">No attribution data available.</div>}
             </div>
           </div>
 
@@ -170,9 +173,11 @@ function PredictiveXAIModal({ xaiData, onClose }) {
               Counterfactual Generator (DiCE)
             </h3>
             <div className="p-4 rounded-xl border border-purple-100 bg-purple-50/50">
-              <p className="type-body text-sm text-slate-700 leading-relaxed">
-                <strong>Tipping Point:</strong> If the intrinsic expression of <span className="type-mono text-purple-600 bg-white px-1 py-0.5 rounded">{tippingFeature}</span> was <strong>{tippingValue}</strong>, the neural network boundary would flip the patient to <span className="font-semibold text-slate-900">{flippedClass}</span>.
-              </p>
+              <ul className="list-disc pl-5 type-body text-sm text-slate-700 leading-relaxed">
+                {counterfactuals.length > 0 ? counterfactuals.map((cf, idx) => (
+                  <li key={idx}><strong>Tipping Point:</strong> {cf}</li>
+                )) : <li>No counterfactual data available.</li>}
+              </ul>
             </div>
           </div>
 
@@ -234,39 +239,28 @@ function MonoLabel({ children }) {
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 export default function Home() {
-  const [view,       setView]       = useState('landing');
+  const [view, setView] = useState('landing');
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [prediction, setPrediction] = useState(null);
-  const [loading,    setLoading]    = useState(false);
-  const [fileData,   setFileData]   = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [fileData, setFileData] = useState(null);
   const [selectedFile, setSelectedFile] = useState(null);
 
-  const [activeModal, setActiveModal]  = useState(null);
-  const [selectedXAI, setSelectedXAI]  = useState(null);
+  const [activeModal, setActiveModal] = useState(null);
+  const [selectedXAI, setSelectedXAI] = useState(null);
 
   // ── Export Logic ───────────────────────────────────────────────────────────
   const handleExportReport = () => {
     if (!prediction) return;
     let csvContent = "Patient_COSMIC_ID,Predicted_Class,XAI_Summary\n";
-    const fakeReasonsSensitive = [
-      "Driven by KRAS upregulation and TP53 absence.",
-      "High expression of predictive biomarker CD274.",
-      "Pathway aligned with MEK inhibition sensitivity.",
-      "Strong activation of MAPK signaling cascade."
-    ];
-    const fakeReasonsResistant = [
-      "BRAF V600E mutation conferred bypass resistance.",
-      "NRAS amplification limits compound efficacy.",
-      "Low baseline target expression detected.",
-      "Presence of compensatory PI3K pathway activation."
-    ];
-    prediction.sensitive.forEach(id => {
-      const reason = fakeReasonsSensitive[Math.floor(Math.random() * fakeReasonsSensitive.length)];
-      csvContent += `${id},High-Responder (Trial Go),${reason}\n`;
+
+    prediction.sensitive.forEach(pt => {
+      const reason = pt.narrative ? pt.narrative.replace(/"/g, '""') : "No summary provided";
+      csvContent += `${pt.id},High-Responder (Trial Go),"${reason}"\n`;
     });
-    prediction.resistant.forEach(id => {
-      const reason = fakeReasonsResistant[Math.floor(Math.random() * fakeReasonsResistant.length)];
-      csvContent += `${id},Resistant (Trial No-Go),${reason}\n`;
+    prediction.resistant.forEach(pt => {
+      const reason = pt.narrative ? pt.narrative.replace(/"/g, '""') : "No summary provided";
+      csvContent += `${pt.id},Resistant (Trial No-Go),"${reason}"\n`;
     });
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -289,13 +283,13 @@ export default function Home() {
         const text = event.target.result;
         const lines = text.replace(/\r/g, '').split('\n').filter(l => l.trim());
         const firstParts = lines[0].split(',').map(p => p.trim());
-        const isDataset  = firstParts.includes('COSMIC_ID') || firstParts.includes('ID') || firstParts.includes('Label');
+        const isDataset = firstParts.includes('COSMIC_ID') || firstParts.includes('ID') || firstParts.includes('Label');
 
         if (isDataset && lines.length > 1) {
-           setFileData({ type: 'batch', rowCount: lines.length - 1 });
-           alert(`Success: Dataset loaded with ${lines.length - 1} subjects. Ready for cohort stratification.`);
+          setFileData({ type: 'batch', rowCount: lines.length - 1 });
+          alert(`Success: Dataset loaded with ${lines.length - 1} subjects. Ready for cohort stratification.`);
         } else {
-           throw new Error("Invalid format");
+          throw new Error("Invalid format");
         }
       } catch (err) {
         alert("Error parsing file. Please use a CSV dataset format with a COSMIC_ID or ID column.");
@@ -306,27 +300,67 @@ export default function Home() {
 
   // ── Predict Logic ──────────────────────────────────────────────────────────
   const handlePredict = async () => {
-    if (!fileData) {
+    if (!fileData || !selectedFile) {
       alert('Please upload genomic data first.');
       return;
     }
     setLoading(true);
     try {
-      const formData = new FormData();
-      formData.append("file", selectedFile);
-      const res = await fetch('http://localhost:8000/predict_batch', {
-        method: 'POST',
-        body: formData,
-      });
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.detail || 'Batch prediction failed');
+      const text = await selectedFile.text();
+      const lines = text.replace(/\r/g, '').split('\n').filter(l => l.trim());
+      const headers = lines[0].split(',').map(h => h.trim());
+      const idColIndex = headers.findIndex(h => h.includes('COSMIC_ID') || h.includes('ID') || h.includes('Label'));
+      
+      if (idColIndex === -1) {
+        throw new Error("Could not find a valid ID column in CSV.");
       }
-      const data = await res.json();
+
+      let sensitive = [];
+      let resistant = [];
+
+      for (let i = 1; i < lines.length; i++) {
+        const parts = lines[i].split(',').map(p => p.trim());
+        const id = parts[idColIndex];
+        const expression_dict = {};
+        for (let j = 0; j < headers.length; j++) {
+          if (j !== idColIndex && headers[j]) {
+            expression_dict[headers[j]] = !isNaN(parseFloat(parts[j])) ? parseFloat(parts[j]) : 0;
+          }
+        }
+
+        const res = await fetch('http://localhost:8000/predict', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ expression_dict })
+        });
+        
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          console.error(`Error for ID ${id}:`, err);
+          continue; // Skip failed records
+        }
+
+        const data = await res.json();
+        
+        const ptData = {
+          id,
+          confidence: data.confidence,
+          attribution: data.clearbox_layer_1_attribution,
+          counterfactuals: data.clearbox_layer_2_counterfactuals,
+          narrative: data.clearbox_layer_3_narrative
+        };
+
+        if (data.prediction === 'Sensitive') {
+          sensitive.push(ptData);
+        } else {
+          resistant.push(ptData);
+        }
+      }
+
       setPrediction({
         type: 'batch',
-        sensitive: data.sensitive,
-        resistant: data.resistant
+        sensitive,
+        resistant
       });
     } catch (err) {
       alert(`Error: ${err.message}. Make sure the backend server is running.`);
@@ -409,7 +443,7 @@ export default function Home() {
             {view === 'landing' ? (
               <motion.button
                 id="nav-portal-btn"
-                onClick={() => setView('login')}
+                onClick={() => setView('dashboard')}
                 whileHover={{ scale: 1.05, transition: SPRING }}
                 whileTap={{ scale: 0.96, transition: SPRING }}
                 className="btn-primary px-4 py-2 text-xs"
@@ -490,14 +524,14 @@ export default function Home() {
                     className="type-body max-w-md mb-10"
                     style={{ color: 'var(--text-secondary)', lineHeight: 1.6 }}
                   >
-                    Reduce Phase II/III timelines by up to 40% and prevent millions in R&amp;D waste. Our 1D CNN identifies high-responders instantly, saving ~$36k per avoided 'No-Go' participant.
+                    Reduce Phase II/III timelines by up to 40% and prevent millions in R&amp;D waste. Our 1D CNN identifies high-responders instantly, saving ~₹30L per avoided 'No-Go' participant.
                   </motion.p>
 
                   {/* CTAs */}
                   <motion.div variants={fadeUp} className="flex flex-wrap gap-3.5 mb-16">
                     <motion.button
                       id="launch-predictor-btn"
-                      onClick={() => setView('login')}
+                      onClick={() => setView('dashboard')}
                       whileHover={{ scale: 1.04, transition: SPRING }}
                       whileTap={{ scale: 0.97, transition: SPRING }}
                       className="btn-primary flex items-center gap-2.5 px-7 py-3.5 text-sm"
@@ -521,9 +555,9 @@ export default function Home() {
                     className="grid grid-cols-3 gap-4 pt-8"
                     style={{ borderTop: '1px solid rgba(0,0,0,0.06)' }}
                   >
-                    <StatCard value="$36k" label="Saved per 'No-Go'"     />
-                    <StatCard value="89%"    label="Waste Prevented"   />
-                    <StatCard value="40%"    label="Time Reduction" />
+                    <StatCard value="₹30L" label="Saved per 'No-Go'" />
+                    <StatCard value="89%" label="Waste Prevented" />
+                    <StatCard value="40%" label="Time Reduction" />
                   </motion.div>
                 </div>
 
@@ -534,25 +568,25 @@ export default function Home() {
                     background: 'radial-gradient(ellipse, rgba(79,142,247,0.1) 0%, transparent 68%)',
                   }} />
 
-                  <PharmaFeatureCard 
-                    icon={Zap} 
-                    title="Acceleration" 
-                    text="Reduce Phase II/III timelines by up to 40% by identifying high-responders instantly via In-Silico screening." 
+                  <PharmaFeatureCard
+                    icon={Zap}
+                    title="Acceleration"
+                    text="Reduce Phase II/III timelines by up to 40% by identifying high-responders instantly via In-Silico screening."
                   />
-                  <PharmaFeatureCard 
-                    icon={BarChart3} 
-                    title="Financial Impact" 
-                    text="Prevent millions in R&D waste. Our model identifies the 89% of resistant patients before they enter the trial, saving ~$36,000 per avoided 'No-Go' participant." 
+                  <PharmaFeatureCard
+                    icon={BarChart3}
+                    title="Financial Impact"
+                    text="Prevent millions in R&D waste. Our model identifies the 89% of resistant patients before they enter the trial, saving ~₹3,000,000 per avoided 'No-Go' participant."
                   />
-                  <PharmaFeatureCard 
-                    icon={ShieldCheck} 
-                    title="Safety & Ethics" 
-                    text="Eliminate unnecessary toxicity. Ensure that experimental compounds are only administered to patients with the genomic profile to benefit, protecting human lives from futile side effects." 
+                  <PharmaFeatureCard
+                    icon={ShieldCheck}
+                    title="Safety & Ethics"
+                    text="Eliminate unnecessary toxicity. Ensure that experimental compounds are only administered to patients with the genomic profile to benefit, protecting human lives from futile side effects."
                   />
-                  <PharmaFeatureCard 
-                    icon={FlaskConical} 
-                    title="Asset Salvage" 
-                    text="Save potential blockbusters from trial failure. GenoStrat can 'rescue' drugs that failed 'all-comer' trials by uncovering the specific sub-populations where the drug actually works." 
+                  <PharmaFeatureCard
+                    icon={FlaskConical}
+                    title="Asset Salvage"
+                    text="Save potential blockbusters from trial failure. GenoStrat can 'rescue' drugs that failed 'all-comer' trials by uncovering the specific sub-populations where the drug actually works."
                   />
                 </motion.div>
 
@@ -560,78 +594,6 @@ export default function Home() {
             </motion.div>
           )}
 
-          {/* ── LOGIN ────────────────────────────────────────────── */}
-          {view === 'login' && (
-            <motion.div
-              key="login"
-              initial={{ opacity: 0, scale: 0.9, y: 28 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 1.05, filter: 'blur(6px)', transition: { duration: 0.28, ease: EASE_OUT } }}
-              transition={{ duration: 0.65, ease: EXPO_OUT }}
-              className="max-w-[420px] mx-auto"
-            >
-              <div className="glass-card p-10 border-gradient-blue">
-                {/* Header */}
-                <div className="text-center mb-10">
-                  <motion.div
-                    initial={{ scale: 0.7, opacity: 0 }}
-                    animate={{ scale: 1, opacity: 1 }}
-                    transition={SPRING_SOFT}
-                    className="inline-flex p-4 rounded-2xl mb-6"
-                    style={{ background: 'rgba(79,142,247,0.08)', border: '1px solid rgba(79,142,247,0.18)' }}
-                  >
-                    <Lock className="w-7 h-7" style={{ color: 'var(--blue)' }} />
-                  </motion.div>
-                  <h2 className="type-heading mb-2" style={{ color: '#080c14' }}>Enterprise Auth</h2>
-                  <p className="type-body" style={{ color: 'var(--text-secondary)', fontSize: '0.88rem' }}>
-                    Secure portal for pharmaceutical R&amp;D and clinical data teams.
-                  </p>
-                </div>
-
-                {/* Form */}
-                <div className="space-y-5">
-                  {[
-                    { id: 'license-input', label: 'Enterprise API Key', type: 'text',  placeholder: 'e.g. RND-90210-XX' },
-                    { id: 'email-input',   label: 'Professional Email',      type: 'email', placeholder: 'name@pharma.org' },
-                  ].map(({ id, label, type, placeholder }) => (
-                    <div key={id}>
-                      <label className="block mb-2.5 type-mono" style={{ color: 'var(--text-muted)' }}>
-                        {label}
-                      </label>
-                      <input
-                        id={id}
-                        type={type}
-                        placeholder={placeholder}
-                        className="input-dark w-full px-4 py-3.5 text-sm"
-                      />
-                    </div>
-                  ))}
-
-                  <motion.button
-                    id="verify-btn"
-                    onClick={() => setView('dashboard')}
-                    whileHover={{ scale: 1.03, transition: SPRING }}
-                    whileTap={{ scale: 0.97, transition: SPRING }}
-                    className="btn-primary w-full py-3.5 text-sm mt-2"
-                    style={{ borderRadius: '0.7rem' }}
-                  >
-                    Verify &amp; Enter
-                    <ArrowRight className="w-4 h-4 ml-2" />
-                  </motion.button>
-                </div>
-
-                {/* Footer */}
-                <div className="mt-8 flex items-center justify-center gap-3">
-                  {['HIPAA', 'SOC2 Type II', 'E2E Encrypted'].map((badge, i) => (
-                    <span key={badge} className="flex items-center gap-2">
-                      {i > 0 && <span style={{ color: 'var(--text-muted)', opacity: 0.4 }}>·</span>}
-                      <span className="type-mono" style={{ color: 'var(--text-muted)' }}>{badge}</span>
-                    </span>
-                  ))}
-                </div>
-              </div>
-            </motion.div>
-          )}
 
           {/* ── DASHBOARD ────────────────────────────────────────── */}
           {view === 'dashboard' && (
@@ -756,7 +718,7 @@ export default function Home() {
                   {/* Prediction Result */}
                   <AnimatePresence>
                     {prediction && (
-                       <motion.div
+                      <motion.div
                         key="result-batch"
                         initial={{ opacity: 0, y: 32 }}
                         animate={{ opacity: 1, y: 0 }}
@@ -764,57 +726,57 @@ export default function Home() {
                         transition={{ duration: 0.7, ease: EXPO_OUT }}
                         className="glass-card p-8 relative overflow-hidden shadow-lg"
                         style={{ borderColor: 'rgba(37,99,235,0.2)' }}
-                       >
-                         <h4 className="type-heading mb-6" style={{ fontSize: '1.2rem' }}>Cohort Stratification Results</h4>
-                         
-                         <div className="grid md:grid-cols-2 gap-6">
-                            {/* Sensitive List */}
-                            <div className="p-5 rounded-2xl" style={{ background: 'rgba(22,163,74,0.05)', border: '1px solid rgba(22,163,74,0.15)' }}>
-                               <div className="flex items-center gap-2 mb-4">
-                                  <BrainCircuit className="w-5 h-5" style={{ color: 'var(--green)' }} />
-                                  <span className="type-heading text-lg" style={{ color: 'var(--green)' }}>High-Responders (Trial Go)</span>
-                                  <span className="ml-auto type-mono text-sm" style={{ color: 'var(--text-muted)' }}>{prediction.sensitive.length} pts</span>
-                               </div>
-                               <div className="max-h-48 overflow-y-auto pr-2 space-y-2" style={{ scrollbarWidth: 'thin' }}>
-                                  {prediction.sensitive.length > 0 ? prediction.sensitive.map((id, idx) => (
-                                      <motion.button 
-                                          key={idx} 
-                                          onClick={() => setSelectedXAI({ id, type: 'sensitive' })}
-                                          whileHover={{ scale: 1.03, y: -2 }}
-                                          whileTap={{ scale: 0.98 }}
-                                          className="type-mono text-sm py-1.5 px-3 rounded-lg w-full text-left transition-colors" 
-                                          style={{ background: 'rgba(255,255,255,0.6)', border: '1px solid rgba(22,163,74,0.1)', cursor: 'pointer' }}
-                                      >
-                                          ID: {id} <span className="float-right text-[10px] text-green-600 opacity-60 pt-0.5">XAI ↱</span>
-                                      </motion.button>
-                                  )) : <div className="text-sm" style={{ color: 'var(--text-muted)' }}>None found.</div>}
-                               </div>
+                      >
+                        <h4 className="type-heading mb-6" style={{ fontSize: '1.2rem' }}>Cohort Stratification Results</h4>
+
+                        <div className="grid md:grid-cols-2 gap-6">
+                          {/* Sensitive List */}
+                          <div className="p-5 rounded-2xl" style={{ background: 'rgba(22,163,74,0.05)', border: '1px solid rgba(22,163,74,0.15)' }}>
+                            <div className="flex items-center gap-2 mb-4">
+                              <BrainCircuit className="w-5 h-5" style={{ color: 'var(--green)' }} />
+                              <span className="type-heading text-lg" style={{ color: 'var(--green)' }}>High-Responders (Trial Go)</span>
+                              <span className="ml-auto type-mono text-sm" style={{ color: 'var(--text-muted)' }}>{prediction.sensitive.length} pts</span>
                             </div>
-                            
-                            {/* Resistant List */}
-                            <div className="p-5 rounded-2xl" style={{ background: 'rgba(220,38,38,0.05)', border: '1px solid rgba(220,38,38,0.15)' }}>
-                               <div className="flex items-center gap-2 mb-4">
-                                  <BrainCircuit className="w-5 h-5" style={{ color: 'var(--red)' }} />
-                                  <span className="type-heading text-lg" style={{ color: 'var(--red)' }}>Resistant (Trial No-Go)</span>
-                                  <span className="ml-auto type-mono text-sm" style={{ color: 'var(--text-muted)' }}>{prediction.resistant.length} pts</span>
-                               </div>
-                               <div className="max-h-48 overflow-y-auto pr-2 space-y-2" style={{ scrollbarWidth: 'thin' }}>
-                                  {prediction.resistant.length > 0 ? prediction.resistant.map((id, idx) => (
-                                      <motion.button 
-                                          key={idx} 
-                                          onClick={() => setSelectedXAI({ id, type: 'resistant' })}
-                                          whileHover={{ scale: 1.03, y: -2 }}
-                                          whileTap={{ scale: 0.98 }}
-                                          className="type-mono text-sm py-1.5 px-3 rounded-lg w-full text-left transition-colors" 
-                                          style={{ background: 'rgba(255,255,255,0.6)', border: '1px solid rgba(220,38,38,0.1)', cursor: 'pointer' }}
-                                      >
-                                          ID: {id} <span className="float-right text-[10px] text-red-600 opacity-60 pt-0.5">XAI ↱</span>
-                                      </motion.button>
-                                  )) : <div className="text-sm" style={{ color: 'var(--text-muted)' }}>None found.</div>}
-                               </div>
+                            <div className="max-h-48 overflow-y-auto pr-2 space-y-2" style={{ scrollbarWidth: 'thin' }}>
+                              {prediction.sensitive.length > 0 ? prediction.sensitive.map((pt, idx) => (
+                                <motion.button
+                                  key={idx}
+                                  onClick={() => setSelectedXAI({ id: pt.id, type: 'sensitive', ...pt })}
+                                  whileHover={{ scale: 1.03, y: -2 }}
+                                  whileTap={{ scale: 0.98 }}
+                                  className="type-mono text-sm py-1.5 px-3 rounded-lg w-full text-left transition-colors"
+                                  style={{ background: 'rgba(255,255,255,0.6)', border: '1px solid rgba(22,163,74,0.1)', cursor: 'pointer' }}
+                                >
+                                  ID: {pt.id} <span className="float-right text-[10px] text-green-600 opacity-60 pt-0.5">{pt.confidence} ↱</span>
+                                </motion.button>
+                              )) : <div className="text-sm" style={{ color: 'var(--text-muted)' }}>None found.</div>}
                             </div>
-                         </div>
-                       </motion.div>
+                          </div>
+
+                          {/* Resistant List */}
+                          <div className="p-5 rounded-2xl" style={{ background: 'rgba(220,38,38,0.05)', border: '1px solid rgba(220,38,38,0.15)' }}>
+                            <div className="flex items-center gap-2 mb-4">
+                              <BrainCircuit className="w-5 h-5" style={{ color: 'var(--red)' }} />
+                              <span className="type-heading text-lg" style={{ color: 'var(--red)' }}>Resistant (Trial No-Go)</span>
+                              <span className="ml-auto type-mono text-sm" style={{ color: 'var(--text-muted)' }}>{prediction.resistant.length} pts</span>
+                            </div>
+                            <div className="max-h-48 overflow-y-auto pr-2 space-y-2" style={{ scrollbarWidth: 'thin' }}>
+                              {prediction.resistant.length > 0 ? prediction.resistant.map((pt, idx) => (
+                                <motion.button
+                                  key={idx}
+                                  onClick={() => setSelectedXAI({ id: pt.id, type: 'resistant', ...pt })}
+                                  whileHover={{ scale: 1.03, y: -2 }}
+                                  whileTap={{ scale: 0.98 }}
+                                  className="type-mono text-sm py-1.5 px-3 rounded-lg w-full text-left transition-colors"
+                                  style={{ background: 'rgba(255,255,255,0.6)', border: '1px solid rgba(220,38,38,0.1)', cursor: 'pointer' }}
+                                >
+                                  ID: {pt.id} <span className="float-right text-[10px] text-red-600 opacity-60 pt-0.5">{pt.confidence} ↱</span>
+                                </motion.button>
+                              )) : <div className="text-sm" style={{ color: 'var(--text-muted)' }}>None found.</div>}
+                            </div>
+                          </div>
+                        </div>
+                      </motion.div>
                     )}
                   </AnimatePresence>
                 </div>
@@ -830,11 +792,11 @@ export default function Home() {
                     </div>
                     <div className="space-y-0">
                       {[
-                        { label: 'Architecture',  value: '1D CNN'          },
-                        { label: 'Regularization', value: 'Dropout 0.2'    },
-                        { label: 'Dataset',        value: 'GDSC v8.4'      },
-                        { label: 'Task',           value: 'Binary Class.'  },
-                        { label: 'Features',       value: 'SelectKBest 900' },
+                        { label: 'Architecture', value: '1D CNN' },
+                        { label: 'Regularization', value: 'Dropout 0.2' },
+                        { label: 'Dataset', value: 'GDSC v8.4' },
+                        { label: 'Task', value: 'Binary Class.' },
+                        { label: 'Features', value: 'SelectKBest 900' },
                       ].map(({ label, value }) => (
                         <div key={label} className="data-row flex justify-between items-center py-3">
                           <span className="type-mono" style={{ color: 'var(--text-secondary)', textTransform: 'none', letterSpacing: '0.01em', fontSize: '0.75rem' }}>
@@ -878,6 +840,20 @@ export default function Home() {
                       FastAPI · localhost:8000 · Model v1.0
                     </div>
                   </motion.div>
+
+                  {/* Savings Impact Module */}
+                  <motion.div variants={fadeUp} className="glass-card p-6" style={{ background: 'rgba(22,163,74,0.05)', borderColor: 'rgba(22,163,74,0.15)' }}>
+                    <div className="flex items-center gap-2 mb-4">
+                      <BarChart3 className="w-5 h-5" style={{ color: 'var(--green)' }} />
+                      <span className="type-heading text-sm" style={{ color: 'var(--green)' }}>Projected ROI Savings</span>
+                    </div>
+                    <div className="type-mono font-bold tracking-tighter leading-none pt-2 pb-1" style={{ color: 'var(--green)', fontSize: '2.5rem' }}>
+                      ₹{prediction && prediction.resistant ? (prediction.resistant.length * 3000000).toLocaleString('en-IN') : '0'}
+                    </div>
+                    <div className="type-mono mt-4" style={{ color: 'var(--text-muted)', fontSize: '0.8rem', lineHeight: 1.5 }}>
+                      {prediction && prediction.resistant ? `Saved by averting trial resources for ${prediction.resistant.length} non-responding subjects.` : 'Awaiting cohort screening to calculate prevented waste.'}
+                    </div>
+                  </motion.div>
                 </div>
               </div>
             </motion.div>
@@ -885,6 +861,9 @@ export default function Home() {
 
         </AnimatePresence>
       </main>
+
+      {/* Team Section Component conditionally rendered directly below the main layout block for dashboard */}
+      {view === 'dashboard' && <TeamSection />}
 
       {/* Modals */}
       <AnimatePresence>
@@ -992,8 +971,8 @@ export default function Home() {
         >
           <AnimatePresence mode="wait">
             {isChatOpen
-              ? <motion.div key="x"   initial={{ rotate: -90, opacity: 0 }} animate={{ rotate: 0, opacity: 1 }} exit={{ rotate:  90, opacity: 0 }} transition={{ duration: 0.2 }}><X className="w-5 h-5" /></motion.div>
-              : <motion.div key="msg" initial={{ rotate:  90, opacity: 0 }} animate={{ rotate: 0, opacity: 1 }} exit={{ rotate: -90, opacity: 0 }} transition={{ duration: 0.2 }}><MessageSquare className="w-5 h-5" /></motion.div>
+              ? <motion.div key="x" initial={{ rotate: -90, opacity: 0 }} animate={{ rotate: 0, opacity: 1 }} exit={{ rotate: 90, opacity: 0 }} transition={{ duration: 0.2 }}><X className="w-5 h-5" /></motion.div>
+              : <motion.div key="msg" initial={{ rotate: 90, opacity: 0 }} animate={{ rotate: 0, opacity: 1 }} exit={{ rotate: -90, opacity: 0 }} transition={{ duration: 0.2 }}><MessageSquare className="w-5 h-5" /></motion.div>
             }
           </AnimatePresence>
         </motion.button>

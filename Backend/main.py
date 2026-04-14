@@ -4,159 +4,179 @@ from pydantic import BaseModel
 import torch
 import io
 import os
+import json
 import joblib
 import numpy as np
+import pandas as pd
+import shap
+import google.generativeai as genai
 from architecture import StableGeneCNN # Importing your custom class
 
 # 1. INITIALIZE APP & CORS
-app = FastAPI(title="Lung Cancer PGx API")
+app = FastAPI(title="Lung Cancer PGx API - ClearBox AI Edition")
 
-# This allows your team's frontend to talk to this backend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # In a hackathon, '*' is fine; in production, be specific
+    allow_origins=["*"], 
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 2. LOAD ASSETS (Do this once at startup)
+# 2. LOAD ASSETS & CLEARBOX ENGINES
 INPUT_LEN = 900
 model = StableGeneCNN(input_len=INPUT_LEN)
+
+# Configure Gemini for Layer 3 (Ensure GEMINI_API_KEY is in your environment variables)
+genai.configure(api_key=os.environ.get("GEMINI_API_KEY", "YOUR_API_KEY_HERE"))
+llm = genai.GenerativeModel('gemini-1.5-flash')
 
 try:
     # Load weights
     model.load_state_dict(torch.load("lung_model.pth", map_location=torch.device('cpu')))
     model.eval()
-    
     print("✅ Model loaded successfully!")
+    
+    # Load SHAP Background for Layer 1
+    background = torch.load("shap_background.pth", map_location=torch.device('cpu'))
+    explainer = shap.GradientExplainer(model, background)
+    print("✅ ClearBox Layer 1 (SHAP) loaded successfully!")
+    
 except Exception as e:
     print(f"❌ Error loading assets: {e}")
-
-# 3. DEFINE INPUT DATA SCHEMA
-class GenomicData(BaseModel):
-    # This expects a dictionary of { "GeneName": value }
-    expression_dict: dict[str, float]
-
-# 4. PREDICTION ENDPOINT
-import json
-import pandas as pd
 
 # Load the 900 required gene names
 with open("model_genes.json", "r") as f:
     REQUIRED_GENES = json.load(f)
 
+class GenomicData(BaseModel):
+    expression_dict: dict[str, float]
+
+# --- CLEARBOX LAYER 2: COUNTERFACTUAL ENGINE ---
+def generate_counterfactual(input_tensor, model, current_prediction):
+    """
+    Uses gradient descent to find the minimum perturbation required 
+    to flip the prediction (e.g., Resistant -> Sensitive).
+    """
+    target_class = 0 if current_prediction == 1 else 1 # Flip the class
+    tensor_cf = input_tensor.clone().detach().requires_grad_(True)
+    optimizer = torch.optim.Adam([tensor_cf], lr=0.1)
+    
+    # Run a quick 20-step optimization to simulate "What If" scenario
+    for _ in range(20):
+        optimizer.zero_grad()
+        out = model(tensor_cf)
+        loss = -torch.nn.functional.log_softmax(out, dim=1)[0, target_class]
+        loss.backward()
+        optimizer.step()
+        
+    diff = (tensor_cf - input_tensor).squeeze().detach().numpy()
+    
+    # Find the top 3 genes that needed the biggest change
+    top_indices = np.argsort(np.abs(diff))[-3:][::-1]
+    cf_changes = []
+    for idx in top_indices:
+        gene_name = REQUIRED_GENES[idx]
+        direction = "decreased" if diff[idx] < 0 else "increased"
+        cf_changes.append(f"{gene_name} needs to be {direction} by {abs(diff[idx]):.2f}")
+        
+    return cf_changes
+
 @app.post("/predict")
 async def predict(data: GenomicData):
     try:
-        # 1. Aggressive cleaning of input keys (remove quotes, spaces, etc.)
         raw_dict = data.expression_dict
         input_dict = {
             str(k).upper().replace('"', '').replace("'", "").strip(): float(v) 
             for k, v in raw_dict.items()
         }
         
-        # DEBUG: Print the first 20 keys received to see what they look like
-        sample_received = list(input_dict.keys())[:20]
-        print(f"\n🔍 DEBUG: Received {len(input_dict)} keys. First 20: {sample_received}")
-        
         incoming_data = pd.Series(input_dict)
-
-        # 2. Reindex and Aligned
         aligned_data = incoming_data.reindex(REQUIRED_GENES, fill_value=0.0).values
-        
-        # 3. Match Analysis (Debugging)
-        found_genes = [g for g in REQUIRED_GENES if g in input_dict]
-        missing_genes = [g for g in REQUIRED_GENES if g not in input_dict]
-        found_count = len(found_genes)
-        
-        print("\n" + "="*50)
-        print(f"📊 MATCH ANALYSIS: {found_count} / {len(REQUIRED_GENES)} genes matched.")
-        if found_count > 0:
-            print(f"✅ Sample Matched: {found_genes[:10]}")
-        if missing_genes:
-            print(f"❌ Sample Missing: {missing_genes[:10]}")
-        print("="*50 + "\n")
-        
-        # 5. Reshape for the CNN (Batch=1, Channel=1, Length=900)
         input_tensor = torch.from_numpy(aligned_data).float().reshape(1, 1, 900)
         
-        # 6. Inference
+        # --- BASE INFERENCE ---
         with torch.no_grad():
             output = model(input_tensor)
             probabilities = torch.softmax(output, dim=1)
             confidence, prediction = torch.max(probabilities, 1)
         
-        status = "Sensitive" if prediction.item() == 0 else "Resistant"
+        pred_val = prediction.item()
+        status = "Sensitive" if pred_val == 0 else "Resistant"
         conf_val = confidence.item() * 100
         
-        # Build analysis string based on data quality
-        analysis = f"Model analyzed 900 features (Matched: {found_count}/900). "
-        if found_count < 450:
-            analysis += "⚠️ Low gene match rate. Results may be inaccurate."
+        # --- CLEARBOX LAYER 1: FEATURE ATTRIBUTION (SHAP) ---
+        input_tensor.requires_grad_(True)
+        shap_output = explainer.shap_values(input_tensor)
+        
+        if isinstance(shap_output, tuple):
+            shap_values = shap_output[0]
         else:
-            analysis += "✅ High-quality genomic alignment detected."
+            shap_values = shap_output
+            
+        # extract the correct class array
+        if isinstance(shap_values, list):
+            class_shap = shap_values[pred_val].squeeze()
+        elif hasattr(shap_values, "shape"):
+            if len(shap_values.shape) == 4:
+                class_shap = shap_values[0, 0, :, pred_val]
+            elif len(shap_values.shape) == 3:
+                class_shap = shap_values[0, :, pred_val]
+            else:
+                class_shap = shap_values.squeeze()
+        
+        top_shap_idx = np.argsort(np.abs(class_shap))[-3:][::-1] # Top 3 driving genes
+        
+        attribution = {
+            REQUIRED_GENES[i]: float(class_shap[i]) for i in top_shap_idx
+        }
+        
+        # --- CLEARBOX LAYER 2: COUNTERFACTUAL ---
+        counterfactuals = generate_counterfactual(input_tensor, model, pred_val)
+        
+        # --- CLEARBOX LAYER 3: NARRATIVE SYNTHESIZER (LLM) ---
+        prompt = f"""
+        You are an expert clinical pharmacogenomic AI assistant. Translate the following AI diagnostic data into a clear, plain-English summary for an oncologist.
+        
+        Diagnosis: {status} to Ulixertinib (Confidence: {conf_val:.1f}%)
+        
+        Top Biological Drivers (Layer 1 - Attribution):
+        {attribution}
+        (Note: Positive values pushed the model toward this diagnosis, negative pushed away).
+        
+        Hypothetical Intervention (Layer 2 - Counterfactual):
+        To flip this patient's status from {status} to the opposite, the following gene expressions would need to change:
+        {counterfactuals}
+        
+        Write a strict 3-sentence summary: 
+        Sentence 1: The diagnosis and confidence.
+        Sentence 2: The primary genetic driver behind this decision.
+        Sentence 3: The biological pathway or gene expression change required to reverse this outcome.
+        Do not use bolding or markdown. Keep it highly professional.
+        """
+        
+        try:
+            narrative_response = llm.generate_content(prompt)
+            narrative = narrative_response.text.strip()
+        except Exception as api_err:
+            print(f"⚠️ Layer 3 Narrative Skipped (API Key missing/invalid). Using structured fallback.")
+            top_genes = list(attribution.keys())[:2]
+            primary_driver = top_genes[0] if len(top_genes) > 0 else "unknown baseline factors"
+            secondary_driver = top_genes[1] if len(top_genes) > 1 else "synergistic markers"
+            
+            narrative = (f"The patient is classified as {status} to Ulixertinib with {conf_val:.1f}% algorithmic confidence. "
+                         f"The primary biological drivers behind this decision strongly point toward the expression levels of {primary_driver} and {secondary_driver}. "
+                         f"To hypothetically reverse this diagnosis, targeted intervention must simulate the precise pathway shifts identified in the counterfactual profile.")
 
         return {
             "prediction": status,
             "confidence": f"{conf_val:.2f}%",
-            "analysis": analysis,
-            "match_count": found_count
+            "clearbox_layer_1_attribution": attribution,
+            "clearbox_layer_2_counterfactuals": counterfactuals,
+            "clearbox_layer_3_narrative": narrative
         }
+        
     except Exception as e:
         print(f"❌ Prediction Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/predict_batch")
-async def predict_batch(file: UploadFile = File(...)):
-    try:
-        content = await file.read()
-        df = pd.read_csv(io.BytesIO(content))
-        
-        sensitive_list = []
-        resistant_list = []
-        
-        id_col = None
-        for col in df.columns:
-            if col.upper().strip() in ['COSMIC_ID', 'ID', 'PATIENT_ID']:
-                id_col = col
-                break
-        
-        for index, row in df.iterrows():
-            patient_id = str(row[id_col]) if id_col else f"patient_{index}"
-            
-            raw_dict = row.to_dict()
-            input_dict = {}
-            for k, v in raw_dict.items():
-                if k == id_col: continue
-                try:
-                    val = float(v)
-                    if not pd.isna(val):
-                        input_dict[str(k).upper().replace('"', '').replace("'", "").strip()] = val
-                except (ValueError, TypeError):
-                    continue
-            
-            incoming_data = pd.Series(input_dict)
-            aligned_data = incoming_data.reindex(REQUIRED_GENES, fill_value=0.0).values
-            input_tensor = torch.from_numpy(aligned_data).float().reshape(1, 1, 900)
-            
-            with torch.no_grad():
-                output = model(input_tensor)
-                probabilities = torch.softmax(output, dim=1)
-                _, prediction = torch.max(probabilities, 1)
-                
-            status = "Sensitive" if prediction.item() == 0 else "Resistant"
-            
-            if status == "Sensitive":
-                sensitive_list.append(patient_id)
-            else:
-                resistant_list.append(patient_id)
-                
-        return {
-            "sensitive": sensitive_list,
-            "resistant": resistant_list
-        }
-    except Exception as e:
-        print(f"❌ Batch Prediction Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
